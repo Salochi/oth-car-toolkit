@@ -19,7 +19,7 @@ OVERLAP = 0.03        # metres each slice reaches into its neighbours (no gaps a
 COLLIDER_KIND = vera_mesh.COLLIDER
 
 
-def slice_hulls(P, I, slices):
+def slice_hulls(P, I, slices, floor=None, axles=None):
     """Convex hulls of the body cut into slices along z (the triangles clipped at the cuts, so no slice misses the
     part of a long face that crosses into it). Returns [(positions, triangle indices)]."""
     import bpy, bmesh
@@ -40,6 +40,8 @@ def slice_hulls(P, I, slices):
             r = bmesh.ops.bisect_plane(bm, geom=list(bm.verts) + list(bm.edges) + list(bm.faces), dist=1e-6,
                                        plane_co=(0, 0, z), plane_no=(0, 0, 1), clear_outer=not keep_above, clear_inner=keep_above)
         pts = [tuple(v.co) for v in bm.verts if lo - 1e-4 <= v.co.z <= hi + 1e-4]
+        if floor is not None and axles and axles[0] <= lo and hi <= axles[1]:
+            pts = [(x, max(y, floor), z) for x, y, z in pts]
         bm.free()
         if len(pts) < 4: continue
         hb = bmesh.new()
@@ -64,9 +66,13 @@ def slice_hulls(P, I, slices):
     return out
 
 
-def resliced(mesh, slices):
+def resliced(mesh, slices, floor=None):
     body = mesh.part('body')
-    hulls = slice_hulls(body.P.astype(float), body.I.ravel(), slices)
+    axles = None
+    if floor is not None and 'wheel_FL' in mesh.anchors and 'wheel_RL' in mesh.anchors:
+        zs = sorted((float(mesh.anchors['wheel_FL'][0][2]), float(mesh.anchors['wheel_RL'][0][2])))
+        axles = (zs[0], zs[1])
+    hulls = slice_hulls(body.P.astype(float), body.I.ravel(), slices, floor, axles)
     kept = [q for q in mesh.parts if q.kind != COLLIDER_KIND]
     for i, (V, F, lo, hi) in enumerate(hulls):
         name = 'collider' if i == 0 else f'collider_{i}'
@@ -76,8 +82,9 @@ def resliced(mesh, slices):
     return mesh
 
 
-def apply(path, slices=6):
-    vera_mesh.write(path, resliced(vera_mesh.read(path), slices))
+def apply(path, slices=6, floor=None):
+    """floor: the lowest (metres) the slices wholly between the axles reach (side steps hanging below the floor)."""
+    vera_mesh.write(path, resliced(vera_mesh.read(path), slices, floor))
     print('[colliders] wrote', path)
 
 

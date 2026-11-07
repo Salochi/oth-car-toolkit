@@ -105,7 +105,7 @@ def squarify(areas, x, y, w, h):
     return out
 
 
-def unwrap_looks(atlas, gid, part, cls, part_prio, class_weight, tex, margins_px=(0.5, 0.0), uv_name='atlas'):
+def unwrap_looks(atlas, gid, part, cls, part_prio, class_weight, tex, margins_px=(0.5, 0.0), uv_name='atlas', big_px=256):
     """
     The atlas UVs: each look (gid: per-face look index) gets its own rectangle, so texture filtering and mipmaps never
     mix looks (no tail-lamp red on the bodywork, faces smaller than a texel still read their own look). Rectangle
@@ -166,7 +166,10 @@ def unwrap_looks(atlas, gid, part, cls, part_prio, class_weight, tex, margins_px
         lsel = gid[loop_face] == g
         uv = get_uv(); uv[lsel, 0] /= w; uv[lsel, 1] /= h; set_uv(uv)   # pre-squash so the square pack lands undistorted
         pre = get_uv()
-        for margin in (m / (tex * min(w, h)) for m in margins_px):
+        # wide margins only where the rectangle can afford them (a small look's islands shrank to a texel or two:
+        # a rim's spoke took the black of the margin round it)
+        mp = margins_px if tex * min(w, h) >= big_px else tuple(m for m in margins_px if m <= 0.5) or (0.0,)
+        for margin in (m / (tex * min(w, h)) for m in mp):
             bpy.ops.object.mode_set(mode='OBJECT'); set_uv(pre); edit_select(gid == g)
             bpy.ops.uv.pack_islands(rotate=False, scale=True, margin_method='FRACTION', margin=margin, shape_method='CONCAVE')
             bpy.ops.object.mode_set(mode='OBJECT')
@@ -254,6 +257,50 @@ class Baker:
         img.filepath_raw = os.path.join(self.out, f'{self.name}_{map_name}.png'); img.file_format = 'PNG'; img.save()
 
 
+def ao_floor(img, rects, gcls, floors, tex, lift=0.08):
+    """The AO of the looks of the given classes ({class: floor}) kept at or above floor, and any texel more than lift
+    darker than the median round it (3 x 3) brought up to that: a texel of a fold's island, or one the filtering takes
+    from next door, reads as a black speck on the panel."""
+    px = pixels(img, tex)
+    for g, c in enumerate(gcls):
+        if c not in floors:
+            continue
+        r, cc = rect_pixels(rects, g, tex)
+        a = px[r, cc, 0].copy()
+        pad = np.pad(a, 1, mode='edge')
+        win = np.stack([pad[i:i + a.shape[0], j:j + a.shape[1]] for i in range(3) for j in range(3)])
+        med = np.median(win, 0)
+        a = np.maximum(a, med - lift)
+        a = np.maximum(a, floors[c])
+        px[r, cc, :3] = a[..., None]
+    img.pixels.foreach_set(px.ravel()); img.save()
+
+
+def flatten_looks(img, me, gid, rects, tex, uv_name='atlas'):
+    """Each look's rectangle filled with the look's colour, read at the UV centres of its biggest faces (surely
+    baked). Only for maps that are one flat colour per look (the albedo with no source textures, the masks)."""
+    px = pixels(img, tex)
+    nf = len(me.polygons)
+    ls = np.zeros(nf, np.int64); me.polygons.foreach_get('loop_start', ls)
+    lt = np.zeros(nf, np.int64); me.polygons.foreach_get('loop_total', lt)
+    uv = np.zeros(len(me.loops) * 2); me.uv_layers[uv_name].data.foreach_get('uv', uv); uv = uv.reshape(-1, 2) * tex
+    nxt = np.arange(len(uv)) + 1; nxt[ls + lt - 1] = ls
+    cr = uv[:, 0] * uv[nxt, 1] - uv[nxt, 0] * uv[:, 1]
+    ua = 0.5 * np.abs(np.add.reduceat(cr, ls))
+    cen = np.add.reduceat(uv, ls) / lt[:, None]
+    gid = np.asarray(gid).ravel()
+    for g in rects:
+        f = np.nonzero(gid == g)[0]
+        if not len(f):
+            continue
+        f = f[np.argsort(-ua[f])][:25]
+        ix = np.clip(cen[f].astype(np.int64), 0, tex - 1)
+        col = np.median(px[ix[:, 1], ix[:, 0], :3], 0)
+        r, c = rect_pixels(rects, g, tex)
+        px[r, c, :3] = col
+    img.pixels.foreach_set(px.ravel()); img.save()
+
+
 def blank_looks(img, rects, looks, tex, value=1.0):
     """Sets the given looks' rectangles to a value (lamp lenses and bulbs wrap their own insides: their AO is a noisy
     dark mess, so they get none)."""
@@ -261,6 +308,123 @@ def blank_looks(img, rects, looks, tex, value=1.0):
     for g in looks:
         r, c = rect_pixels(rects, g, tex); px[r, c, :3] = value
     img.pixels.foreach_set(px.ravel()); img.save()
+
+
+def fix_ao_specks(img, me, tex, drop=0.25, max_area=5e-4, grow=1.5, passes=12, uv_name='atlas', only=None):
+    """Small faces baked far darker than the faces round them take their neighbours' AO. A sliver tucked into a
+    fold (a crease's end, a panel seam) bakes black, buried by its own neighbours, and the game draws it as a black
+    streak or speck on the paint; its texels (and grow texels round them: the filtering reaches that far) are
+    refilled with the area-weighted AO of the faces sharing its corners. Returns the number of faces refilled."""
+    px = pixels(img, tex)
+    nf = len(me.polygons)
+    ls = np.zeros(nf, np.int64); me.polygons.foreach_get('loop_start', ls)
+    lt = np.zeros(nf, np.int64); me.polygons.foreach_get('loop_total', lt)
+    area = np.zeros(nf); me.polygons.foreach_get('area', area)
+    lv = np.zeros(len(me.loops), np.int64); me.loops.foreach_get('vertex_index', lv)
+    uv = np.zeros(len(me.loops) * 2); me.uv_layers[uv_name].data.foreach_get('uv', uv); uv = uv.reshape(-1, 2) * tex
+    co = np.zeros((len(me.vertices), 3)); me.vertices.foreach_get('co', co.ravel())
+    lf = np.repeat(np.arange(nf), lt)
+    # each face's AO: its corners pulled a little toward its centre, and the centre
+    cen = np.add.reduceat(uv, ls) / lt[:, None]
+    smp = np.concatenate([cen, uv * 0.7 + cen[lf] * 0.3])
+    sf = np.concatenate([np.arange(nf), lf])
+    ix = np.clip(smp.astype(np.int64), 0, tex - 1)
+    val = px[ix[:, 1], ix[:, 0], 0]
+    fao = np.bincount(sf, val, nf) / np.bincount(sf, None, nf)
+    # the neighbourhood: faces sharing a corner position (the atlas is split along seams: positions, not indices)
+    _, vkey = np.unique(np.round(co, 5), axis=0, return_inverse=True); vkey = vkey.ravel()
+    lk = vkey[lv]
+    # a whole cluster of slivers in a fold bakes black together: passes, each lifting the ones darker than round
+    # them, so the light works in from the cluster's edge
+    nao = fao.copy(); out = np.zeros(nf, bool)
+    for _ in range(passes):
+        acc = np.bincount(lk, (nao * area)[lf], vkey.max() + 1); wsum = np.bincount(lk, area[lf], vkey.max() + 1)
+        nb_a = np.bincount(lf, acc[lk], nf) - nao * area * lt
+        nb_w = np.bincount(lf, wsum[lk], nf) - area * lt
+        nb = np.where(nb_w > 1e-12, nb_a / np.maximum(nb_w, 1e-12), nao)
+        hit = (area < max_area) & (nao < nb - drop)
+        if only is not None:
+            hit &= only
+        if not hit.any():
+            break
+        nao = np.where(hit, nb, nao); out |= hit
+    for f in np.nonzero(out)[0]:
+        t = uv[ls[f]:ls[f] + lt[f]]
+        c = t.mean(0)
+        d = t - c; n = np.linalg.norm(d, axis=1, keepdims=True)
+        t = t + d / np.maximum(n, 1e-9) * grow                     # the polygon grown by grow texels
+        x0, y0 = np.maximum(np.floor(t.min(0)).astype(int), 0); x1, y1 = np.minimum(np.ceil(t.max(0)).astype(int), tex - 1)
+        if x1 < x0 or y1 < y0:
+            continue
+        gx, gy = np.meshgrid(np.arange(x0, x1 + 1) + 0.5, np.arange(y0, y1 + 1) + 0.5)
+        q = np.stack([gx.ravel(), gy.ravel()], 1)
+        inside = np.ones(len(q), bool); sgn = None
+        for i in range(len(t)):
+            e = t[(i + 1) % len(t)] - t[i]
+            cr = e[0] * (q[:, 1] - t[i][1]) - e[1] * (q[:, 0] - t[i][0])
+            s0 = np.sign(e[0] * (c[1] - t[i][1]) - e[1] * (c[0] - t[i][0]))
+            inside &= cr * s0 >= 0
+        yy, xx = (q[inside, 1]).astype(int), (q[inside, 0]).astype(int)
+        px[yy, xx, :3] = np.maximum(px[yy, xx, :3], nao[f])
+    img.pixels.foreach_set(px.ravel()); img.save()
+    return int(out.sum())
+
+
+def fix_ao_buried(img, me, tex, distance, start=0.003, rays=48, below=0.2, gain=0.25, grow=1.5, uv_name='atlas',
+                  only=None):
+    """Faces baked near black re-measured: AO by rays of our own, leaving from start metres off the face (past a
+    second skin a fraction of a millimetre over it, which buries it for the bake: the game shows the face, black).
+    Where that comes out gain lighter, the face's texels take it; a real crevice stays as dark as it baked."""
+    from mathutils import Vector
+    from mathutils.bvhtree import BVHTree
+    px = pixels(img, tex)
+    nf = len(me.polygons)
+    ls = np.zeros(nf, np.int64); me.polygons.foreach_get('loop_start', ls)
+    lt = np.zeros(nf, np.int64); me.polygons.foreach_get('loop_total', lt)
+    uv = np.zeros(len(me.loops) * 2); me.uv_layers[uv_name].data.foreach_get('uv', uv); uv = uv.reshape(-1, 2) * tex
+    lf = np.repeat(np.arange(nf), lt)
+    cen = np.add.reduceat(uv, ls) / lt[:, None]
+    smp = np.concatenate([cen, uv * 0.7 + cen[lf] * 0.3]); sf = np.concatenate([np.arange(nf), lf])
+    ix = np.clip(smp.astype(np.int64), 0, tex - 1)
+    fao = np.bincount(sf, px[ix[:, 1], ix[:, 0], 0], nf) / np.bincount(sf, None, nf)
+    co = [tuple(v.co) for v in me.vertices]
+    tree = BVHTree.FromPolygons(co, [tuple(p.vertices) for p in me.polygons])
+    fn = np.zeros((nf, 3)); me.polygons.foreach_get('normal', fn.ravel())
+    fc = np.zeros((nf, 3)); me.polygons.foreach_get('center', fc.ravel())
+    rng = np.random.default_rng(1)
+    u1, u2 = rng.random(rays), rng.random(rays)                # cosine-weighted hemisphere directions
+    r, phi = np.sqrt(u1), 2 * np.pi * u2
+    hemi = np.stack([r * np.cos(phi), r * np.sin(phi), np.sqrt(1 - u1)], 1)
+    k = 0
+    sel = fao < below if only is None else (fao < below) & only   # only: the faces it may touch (the paint's)
+    for f in np.nonzero(sel)[0]:
+        n = fn[f]
+        t1 = np.cross(n, [0.0, 0.0, 1.0] if abs(n[2]) < 0.9 else [1.0, 0.0, 0.0]); t1 /= np.linalg.norm(t1)
+        t2 = np.cross(n, t1)
+        dirs = hemi[:, :1] * t1 + hemi[:, 1:2] * t2 + hemi[:, 2:] * n
+        o = fc[f] + n * start
+        free = sum(tree.ray_cast(Vector(o.tolist()), Vector(d.tolist()), distance)[0] is None for d in dirs)
+        ao = free / rays
+        if ao < fao[f] + gain:
+            continue
+        t = uv[ls[f]:ls[f] + lt[f]]; c = t.mean(0)
+        dd = t - c; t = t + dd / np.maximum(np.linalg.norm(dd, axis=1, keepdims=True), 1e-9) * grow
+        x0, y0 = np.maximum(np.floor(t.min(0)).astype(int), 0); x1, y1 = np.minimum(np.ceil(t.max(0)).astype(int), tex - 1)
+        if x1 < x0 or y1 < y0:
+            continue
+        gx, gy = np.meshgrid(np.arange(x0, x1 + 1) + 0.5, np.arange(y0, y1 + 1) + 0.5)
+        q = np.stack([gx.ravel(), gy.ravel()], 1)
+        inside = np.ones(len(q), bool)
+        for i in range(len(t)):
+            e = t[(i + 1) % len(t)] - t[i]
+            cr = e[0] * (q[:, 1] - t[i][1]) - e[1] * (q[:, 0] - t[i][0])
+            s0 = np.sign(e[0] * (c[1] - t[i][1]) - e[1] * (c[0] - t[i][0]))
+            inside &= cr * s0 >= 0
+        yy, xx = q[inside, 1].astype(int), q[inside, 0].astype(int)
+        px[yy, xx, :3] = np.maximum(px[yy, xx, :3], ao)
+        k += 1
+    img.pixels.foreach_set(px.ravel()); img.save()
+    return k
 
 
 # ---------------------------------------------------------------- parts, LODs, collider, export
@@ -337,8 +501,15 @@ def export_arrays(o, to_unity, origin=np.zeros(3), smooth=True, smooth_angle=mat
     tl = np.zeros(len(m.loop_triangles) * 3, dtype=np.int64); m.loop_triangles.foreach_get('loops', tl)
     I = inv[tl].reshape(-1, 3)
     Pv, Nv, Uv = P[first], N[first], uv[first]
+    # the axes swap may be a mirror: then every triangle turns round; after that, only one whose normals clearly face
+    # the other way (a refined fold) is turned. A triangle seen edge-on by its normals keeps its winding (by the sign
+    # alone it was a coin toss: a bed wall's faces turned away, slits in the bed)
+    if np.linalg.det(np.asarray(to_unity(np.eye(3)), float)) < 0:
+        I = I[:, ::-1].copy()
     fnrm = np.cross(Pv[I[:, 1]] - Pv[I[:, 0]], Pv[I[:, 2]] - Pv[I[:, 0]])
-    flip = np.einsum('ij,ij->i', fnrm, Nv[I].mean(1)) < 0
+    fnrm /= np.maximum(np.linalg.norm(fnrm, axis=1, keepdims=True), 1e-20)
+    mn = Nv[I].mean(1); mn /= np.maximum(np.linalg.norm(mn, axis=1, keepdims=True), 1e-20)
+    flip = np.einsum('ij,ij->i', fnrm, mn) < -0.3
     I[flip] = I[flip][:, ::-1]
     return Pv.astype('<f4'), Nv.astype('<f4'), Uv.astype('<f4'), I.astype('<u4')
 
@@ -470,6 +641,7 @@ class Previews:
         sc.render.engine = 'BLENDER_WORKBENCH'
         sc.display.shading.light = 'STUDIO'; sc.display.shading.color_type = 'TEXTURE'
         sc.display.shading.show_cavity = True
+        sc.display.shading.show_backface_culling = True   # as the game draws: no backs (inside-out parts show)
         sc.render.resolution_x, sc.render.resolution_y = 1400, 900
         self.cam = bpy.data.objects.new('cam', bpy.data.cameras.new('cam')); sc.collection.objects.link(self.cam); sc.camera = self.cam
         self.cam.data.lens = 50

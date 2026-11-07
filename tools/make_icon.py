@@ -4,7 +4,7 @@ the side windows cut out, the body's own lines cut in (where black trim meets pa
 such as door gaps, sharp creases of the side), a wide gap round each wheel, and wheels with a tall sidewall (a thin cut
 ring and a small solid rim). Transparent background, 256 px wide, like the stock cars' <Car>_Icon sprites.
 
-Run:  python make_icon.py <car.mesh> <out.png> [--tex <prefix>] [--tyre <radius m>] [--seams <list>]
+Run:  python make_icon.py <car.mesh> <out.png> [--tex <prefix>] [--tyre <radius m>] [--seams <list>] [--skip-dark]
 --tex: the built textures' prefix (<prefix>_zones.png, _mask.png, _lights.png: build/tacoma); without it no trim or
        lamp lines, only open edges and creases.
 --tyre: the radius the car really drives on (the donor's when it keeps the donor's wheels; default: the mesh's tyre).
@@ -105,7 +105,7 @@ def feature_edges(part, tex):
     return segs
 
 
-def make(mesh, out, tex_prefix=None, tyre_r=None, seams=()):
+def make(mesh, out, tex_prefix=None, tyre_r=None, seams=(), skip_dark=False):
     parts, anchors = read_mesh(mesh)
     body, glass = parts['body'], parts.get('glass')
     detail = parts.get('body_lod2') if len(body['I']) > 40000 and 'body_lod2' in parts else body
@@ -125,11 +125,19 @@ def make(mesh, out, tex_prefix=None, tyre_r=None, seams=()):
     def px(z, y): return ((z - z0) * k + MARGIN) * SS, ((y1 - y) * k + MARGIN) * SS
 
     a = Image.new('L', (W * SS, H * SS), 0); g = ImageDraw.Draw(a)
-    def fill(part, sel, value, draw=g):
+    def fill(part, sel, value, draw=None):
+        draw = draw or g   # the current image's (a default argument would keep the first one's)
         P, I = part['P'], part['I'][sel]
         for t in I:
             draw.polygon([px(P[i, 2], P[i, 1]) for i in t], fill=value)
-    fill(body, np.ones(len(body['I']), bool), 255)
+    solid = np.ones(len(body['I']), bool)
+    if skip_dark and tex is not None:
+        # dark unpainted faces (wheel tubs, a hollow shell's lining, black engine tin) left out of the outline: the
+        # cut fenders keep their shape in the icon
+        uvc = body['U'][body['I']].mean(1)
+        alb = sample(Image.open(f'{tex_prefix}_albedo_base.png').convert('RGB'), uvc)
+        solid = ~((alb.max(1) < 0.25) & (sample(tex[0], uvc)[:, 0] < 0.5))
+    fill(body, solid, 255)
     # crisp outline: close the small notches and gaps between pieces, then take off the specks
     c = int(2 * CLOSE_PX * SS) | 1
     a = a.filter(ImageFilter.MaxFilter(c)).filter(ImageFilter.MinFilter(c))
@@ -161,6 +169,15 @@ def make(mesh, out, tex_prefix=None, tyre_r=None, seams=()):
         sidew = np.abs(gfn[:, 0]) > 0.6
         fill(glass, sidew, 0)
         fill(glass, sidew, 255, ImageDraw.Draw(win))
+    elif tex is not None:
+        # windows painted on the body (no glass part): glossy in the mask, not a lamp, facing sideways
+        uvc = body['U'][body['I']].mean(1)
+        gloss = sample(tex[1], uvc)[:, 1] > 0.5
+        lamp = sample(tex[2], uvc)[:, :3].max(1) > 0.1
+        bfn = body['N'][body['I']].mean(1)
+        sidew = gloss & ~lamp & (np.abs(bfn[:, 0]) > 0.6)
+        fill(body, sidew, 0)
+        fill(body, sidew, 255, ImageDraw.Draw(win))
     if seams:
         draw_doors(sil, g, win, seams)
     r = tyre_r * k * SS
@@ -243,5 +260,6 @@ def draw_doors(sil, g, win, seams):
 if __name__ == '__main__':
     ap = argparse.ArgumentParser(); ap.add_argument('mesh'); ap.add_argument('out')
     ap.add_argument('--tex'); ap.add_argument('--tyre', type=float); ap.add_argument('--seams', default='')
+    ap.add_argument('--skip-dark', action='store_true', help='leave dark unpainted faces out of the outline (needs --tex)')
     o = ap.parse_args()
-    make(o.mesh, o.out, o.tex, o.tyre, [s for s in o.seams.split(',') if s])
+    make(o.mesh, o.out, o.tex, o.tyre, [s for s in o.seams.split(',') if s], o.skip_dark)

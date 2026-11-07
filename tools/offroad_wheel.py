@@ -187,6 +187,50 @@ def make_rim(name, place, seg=48):
     return b.finish(name, place)
 
 
+def make_split6(name, place, seg=48):
+    """A stock-style 18 x 8.5 inch alloy: six split (paired) spokes, a plain lip instead of the beadlock ring, the same
+    barrel and recessed hub as make_rim. Gloss black barrel, gunmetal spokes with machined faces and lip."""
+    b = Builder(['OT_Black', 'OT_Gunmetal', 'OT_Machined'])
+    Rb, hw = RIM_BEAD_R, 8.5 * 0.0254 / 2
+    barrel = [(-hw - 0.012, Rb + 0.018), (-hw, Rb + 0.018), (-hw + 0.004, Rb), (-0.03, Rb - 0.012),
+              (0.02, Rb - 0.03), (0.06, Rb - 0.03), (hw - 0.01, Rb - 0.004), (hw, Rb)]
+    b.revolve(barrel + [(x, r - 0.006) for x, r in reversed(barrel)], seg, 'OT_Black', closed_profile=True)
+    # the outer lip: a rounded flange the tyre's bead sits against, machined on its face
+    lip = [(hw - 0.004, Rb + 0.022), (hw + 0.008, Rb + 0.022), (hw + 0.012, Rb + 0.014), (hw + 0.012, Rb - 0.004),
+           (hw + 0.004, Rb - 0.012), (hw - 0.004, Rb - 0.012)]
+    b.revolve(lip, seg, 'OT_Black', closed_profile=True,
+              mats=['OT_Black', 'OT_Machined', 'OT_Machined', 'OT_Gunmetal', 'OT_Gunmetal', 'OT_Black'])
+    hub_x = 0.045
+    b.revolve([(0.0, 0.212), (0.0, 0.07), (-0.012, 0.07), (-0.012, 0.212)], seg, 'OT_Black', closed_profile=True)
+    b.revolve([(hub_x - 0.03, 0.083), (hub_x + 0.022, 0.083), (hub_x + 0.026, 0.078), (hub_x + 0.026, 0.066),
+               (hub_x + 0.006, 0.066), (hub_x + 0.006, 0.02), (hub_x - 0.03, 0.02)], seg, 'OT_Gunmetal', closed_profile=True,
+              mats=['OT_Gunmetal', 'OT_Machined', 'OT_Gunmetal', 'OT_Gunmetal', 'OT_Black', 'OT_Black', 'OT_Gunmetal'])
+    for i in range(6):
+        t = 2 * math.pi * (i + 0.5) / 6
+        b.prism_x(0.048 * math.cos(t), 0.048 * math.sin(t), 0.0095, 6, hub_x + 0.006, hub_x + 0.024, 'OT_Machined', rot=t + 0.5)
+    # centre cap: a low hexagonal dome
+    b.prism_x(0.0, 0.0, 0.03, 6, hub_x + 0.006, hub_x + 0.03, 'OT_Black', cap_mat='OT_Machined')
+    # six pairs of spokes: each pair leaves the hub as one, splits on the way out, and runs under the lip
+    r0, r1, steps = 0.078, Rb - 0.006, 6
+    for i in range(6):
+        base = 2 * math.pi * i / 6
+        for side in (-1, 1):
+            secs = []
+            for s_ in range(steps + 1):
+                u = s_ / steps
+                r = r0 + (r1 - r0) * u
+                t = base + side * (0.05 + 0.13 * u)       # the split widens toward the rim
+                w = (0.034 - 0.012 * u) / 2
+                xf = hub_x + 0.026 + 0.035 * math.sin(u * math.pi * 0.5)   # concave face, meets the lip
+                xb = xf - (0.032 - 0.01 * u)
+                tan = Vector((0.0, -math.sin(t), math.cos(t)))
+                c = Vector((0.0, math.cos(t), math.sin(t))) * r
+                secs.append([Vector((xb, 0, 0)) + c - tan * w, Vector((xf, 0, 0)) + c - tan * w * 0.8,
+                             Vector((xf, 0, 0)) + c + tan * w * 0.8, Vector((xb, 0, 0)) + c + tan * w])
+            b.loft(secs, 'OT_Gunmetal', top_mat='OT_Machined', top_index=1)
+    return b.finish(name, place)
+
+
 def make_tyre(name, place, outer_d_in, width_in, seg=56, pitches=None):
     """A mud-terrain tyre: outer diameter and section width in inches, on the 18 inch bead."""
     b = Builder(['OT_Tyre'])

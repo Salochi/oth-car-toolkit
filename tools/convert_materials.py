@@ -23,7 +23,7 @@ GLB, OUT, REF = argv[1], os.path.abspath(argv[2]), argv[3]
 NAME = argv[4] if len(argv) > 4 else P.NAME
 os.makedirs(OUT, exist_ok=True)
 TEX = getattr(P, 'TEX', 2048)
-LOD_TRIS = [int(os.environ.get('LOD0', 10**9))] + list(P.LOD_TRIS)
+LOD_TRIS = [int(os.environ.get('LOD0', getattr(P, 'LOD0_TRIS', 10**9)))] + list(P.LOD_TRIS)
 
 
 def mat_class(name):
@@ -50,8 +50,11 @@ def mat_color(m):
 
 
 # ---------------------------------------------------------------- import, flatten to world space
-bpy.ops.wm.read_factory_settings(use_empty=True)
-bpy.ops.import_scene.gltf(filepath=GLB)
+if GLB.endswith('.blend'):     # refine.py's own .blend (its custom normals exactly as made)
+    bpy.ops.wm.open_mainfile(filepath=GLB)
+else:
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    bpy.ops.import_scene.gltf(filepath=GLB)
 scene = bpy.context.scene
 # animated objects (doors, a tailgate): frozen at the frame where they are least rotated (closed)
 for o in list(bpy.data.objects):
@@ -176,7 +179,24 @@ bpy.ops.object.mode_set(mode='EDIT'); bpy.ops.mesh.separate(type='SELECTED'); bp
 glass = [o for o in scene.objects if o.name.startswith('body.')][0]; glass.name = 'glass'
 
 log(f'body {pl.tris(body)} tris, glass {pl.tris(glass)}, wheel {pl.tris(wheel)}, tyre {pl.tris(tyre)}')
-pl.decimate(body, LOD_TRIS[0])
+# DECIMATE_KEEP (material name parts): faces left out of the decimation. For flat, thin, two-sided backing panels:
+# being flat they are the first to collapse, into long slivers that fold over and lose a side (see-through in game).
+keep_mats = tuple(s.lower() for s in getattr(P, 'DECIMATE_KEEP', ()))
+kept = None
+if keep_mats and pl.tris(body) > LOD_TRIS[0]:
+    pl.select_only(body)
+    bpy.ops.object.mode_set(mode='EDIT'); bpy.ops.mesh.select_all(action='DESELECT'); bpy.ops.object.mode_set(mode='OBJECT')
+    for poly in body.data.polygons:
+        m = body.data.materials[poly.material_index]
+        poly.select = any(s in (m.name.lower() if m else '') for s in keep_mats)
+    if any(p.select for p in body.data.polygons):
+        bpy.ops.object.mode_set(mode='EDIT'); bpy.ops.mesh.separate(type='SELECTED'); bpy.ops.object.mode_set(mode='OBJECT')
+        kept = [o for o in scene.objects if o.name.startswith('body.')][0]
+        log(f'kept out of the decimation: {pl.tris(kept)} tris')
+pl.decimate(body, LOD_TRIS[0] - (pl.tris(kept) if kept else 0))
+if kept:
+    pl.select_only(body); kept.select_set(True); bpy.context.view_layer.objects.active = body
+    bpy.ops.object.join()
 log(f'body decimated to {pl.tris(body)}')
 
 # ---------------------------------------------------------------- optional: the off-road wheel set (garage tyre sizes)
@@ -245,17 +265,40 @@ for nm, arr in (('c_albedo', base), ('c_zones', zones), ('c_mask', mask), ('c_li
 key = np.round(np.concatenate([base, zones, mask, lights, part[:, None]], 1), 3)
 _, gid = np.unique(key, axis=0, return_inverse=True)
 prio = [P.UV_PRIORITY.get(n, 1.0) for n in PART_IDS]   # by part id (dict order)
-rects, gcls, gpart = pl.unwrap_looks(atlas, gid, part, cls, prio, P.CLASS_UV_WEIGHT, TEX, margins_px=(0.5, 0.0))
+rects, gcls, gpart = pl.unwrap_looks(atlas, gid, part, cls, prio, P.CLASS_UV_WEIGHT, TEX,
+                                     margins_px=getattr(P, 'UV_MARGINS', (0.5, 0.0)))
 
 # ---------------------------------------------------------------- bake
 baker = pl.Baker(atlas, OUT, NAME, TEX, ao_distance=P.AO_DISTANCE)
 albedo_img = baker.bake('albedo_base', colour=True)
 zones_img = baker.bake('zones', attr_name='c_zones')
-baker.bake('mask', attr_name='c_mask')
+mask_img = baker.bake('mask', attr_name='c_mask')
 lights_img = baker.bake('lights', attr_name='c_lights')
+# every look is one flat colour: its whole rectangle painted with it (a sliver packed against the rectangle's edge
+# holds no texel centre, the bake skips it and its margin fill came from the black look next door: black specks)
+for img in (albedo_img, zones_img, mask_img, lights_img):
+    pl.flatten_looks(img, me, gid, rects, TEX)
+# the stock wheel and tyre baked away from the body (AO_WHEELS_APART): the fender's shadow would turn with the wheel
+apart = None
+if getattr(P, 'AO_WHEELS_APART', False):
+    wp = set()
+    for poly in me.polygons:
+        if part[poly.index] in (PART_IDS['wheel'], PART_IDS['tyre']):
+            wp.update(poly.vertices)
+    apart = np.array(sorted(wp))
+    co = np.zeros((len(me.vertices), 3)); me.vertices.foreach_get('co', co.ravel())
+    co[apart, 0] += 10.0; me.vertices.foreach_set('co', co.ravel()); me.update()
 ao_img = baker.bake('ao', 'AO', samples=P.AO_SAMPLES)
+if apart is not None:
+    co[apart, 0] -= 10.0; me.vertices.foreach_set('co', co.ravel()); me.update()
 if OT: bpy.data.objects.remove(ot_occluder)   # only there to shade the bigger tyre's inside
-pl.blank_looks(ao_img, rects, [g for g in range(len(gcls)) if gcls[g] in pl.LAMP_CLASSES], TEX)
+blank = set(pl.LAMP_CLASSES) | set(getattr(P, 'AO_BLANK_CLASSES', ()))   # the profile's too
+pl.blank_looks(ao_img, rects, [g for g in range(len(gcls)) if gcls[g] in blank], TEX)
+ao_fix = np.isin(cls, list(getattr(P, 'AO_FLOOR', {PAINT: 0}).keys()))   # the paint's (on the black trim, lifting slivers drew light slits)
+log(f'AO: {pl.fix_ao_buried(ao_img, me, TEX, P.AO_DISTANCE, only=ao_fix)} faces baked black under a second skin re-measured')
+log(f'AO: {pl.fix_ao_specks(ao_img, me, TEX, only=ao_fix)} small faces baked far darker than round them refilled')
+if getattr(P, 'AO_FLOOR', None):           # (class, floor): the paint needs no deep shadow, its gaps are their own colour
+    pl.ao_floor(ao_img, rects, gcls, P.AO_FLOOR, TEX)
 
 # ---------------------------------------------------------------- parts, LODs, collider, export
 parts = pl.split_parts(atlas, PART_IDS)
@@ -294,6 +337,9 @@ for side, sgn in (('L', -1), ('R', 1)):
     if t is not None: anchors['tail_' + side] = (t, BACKQ)
 r = centroid(rear & (cls == EMIT) & ~chmsl)
 if r is not None: anchors['reverse'] = (np.array([0.0, r[1], r[2]]), BACKQ)
+for side, sgn in (('L', -1), ('R', 1)):      # and one per lamp, where the car has them (the framework uses these first)
+    rs = centroid(rear & (cls == EMIT) & ~chmsl & (np.sign(uc[:, 0]) == sgn) & (np.abs(uc[:, 0]) > P.LAMP_MIN_X))
+    if rs is not None: anchors['reverse_' + side] = (rs, BACKQ)
 b = centroid(chmsl)
 if b is not None: anchors['brake'] = (np.array([0.0, b[1], b[2]]), BACKQ)
 pl.report_missing(anchors)
@@ -301,7 +347,7 @@ pl.report_missing(anchors)
 mesh_path = os.path.join(OUT, f'{NAME}.mesh')
 pl.write_mesh(mesh_path, arrays, anchors)
 import colliders
-colliders.apply(mesh_path, getattr(P, 'COLLIDER_SLICES', 6))
+colliders.apply(mesh_path, getattr(P, 'COLLIDER_SLICES', 6), getattr(P, 'COLLIDER_FLOOR', None))
 
 # ---------------------------------------------------------------- previews
 pv = pl.Previews(OUT, TEX, albedo_img, zones_img, ao_img, lights_img, P.PREVIEW_PAINT, P.PREVIEW_TRIM, S)

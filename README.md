@@ -17,6 +17,7 @@ reference car the accessory anchors are copied from.
 
 | | |
 |---|---|
+| `tools/refine.py` | Optional first step for a **low-poly** model: Phong tessellation (each triangle split k x k, the new points lifted onto the curve the normals describe), a fairing pass against the ripples of a decimated mesh, the model's own normals kept for the shading; also scales and turns it. Writes a GLB, and a .blend beside it for `convert_materials.py` (a glTF round trip can scramble custom normals). |
 | `tools/convert_materials.py` | Converter for models coloured by their **materials** (one flat colour per material: detailed Sketchfab-style cars). |
 | `tools/convert_palette.py` | Converter for low-poly models coloured by one **palette texture** (POLYGON-style packs): faces classed by the texture colour under them, the albedo baked from the texture, the paint zone on the painted texels only (wear stays on top of any paint). |
 | `tools/pipeline.py` | The stages both share: the texture atlas (a rectangle per face "look"), the bakes, the body's distance versions (LODs), the collider, the export to the game's axes, the accessory anchors, the `.mesh`, preview renders. |
@@ -24,7 +25,7 @@ reference car the accessory anchors are copied from.
 | `tools/make_icon.py` | The garage icon in the game's style: a white side silhouette with window cut-outs, belt and sill lines, door outlines with handles, the trim pieces' outlines, tall-sidewall wheels. |
 | `tools/offroad_wheel.py` | A procedural beadlock rim with tyres of given sizes (for garage tyre-size upgrades). |
 | `tools/vera_mesh.py` | Reads and writes the `.mesh` format ([docs/mesh-format.md](docs/mesh-format.md)). |
-| `profiles/` | What a converter needs to know about one source model (which material is paint, which object is a wheel, what to drop...). `tacoma.py` and `bajabug.py` are working examples; `example_materials.py` is a commented starting point. |
+| `profiles/` | What a converter needs to know about one source model (which material is paint, which object is a wheel, what to drop...). `tacoma.py`, `tacoma3.py` (refined first) and `bajabug.py` are working examples; `example_materials.py` is a commented starting point. |
 
 ## Requirements
 
