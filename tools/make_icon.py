@@ -9,7 +9,9 @@ Run:  python make_icon.py <car.mesh> <out.png> [--tex <prefix>] [--tyre <radius 
        lamp lines, only open edges and creases.
 --tyre: the radius the car really drives on (the donor's when it keeps the donor's wheels; default: the mesh's tyre).
 --seams: extra door seams, by the side windows front to back (0 the frontmost): "0F" in front of window 0, "0-1"
-       between windows 0 and 1, "1R" behind window 1. Each runs from the window line down to just above the sill.
+       between windows 0 and 1, "1R" behind window 1, "0:0.52" 52% of the way back along window 0 (a pillar too thin
+       to split the glass at the icon's size, e.g. the 4Runner's B-pillar). Each runs from the window line down to just
+       above the sill.
 """
 import argparse, os, sys
 import numpy as np
@@ -233,6 +235,8 @@ def draw_doors(sil, g, win, seams):
     def xs_of(spec):
         if spec.endswith('F'): return runs[int(spec[:-1])][1] + 3 * SS
         if spec.endswith('R'): return runs[int(spec[:-1])][0] - 3 * SS
+        if ':' in spec:
+            i, f = spec.split(':'); a, b = runs[int(i)]; return b - float(f) * (b - a)
         i, j = (int(v) for v in spec.split('-')); return (runs[i][0] + runs[j][1]) // 2
     xs = sorted(int(xs_of(s)) for s in seams)
     def bottom(xc):

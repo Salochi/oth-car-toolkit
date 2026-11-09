@@ -25,7 +25,7 @@ reference car the accessory anchors are copied from.
 | `tools/make_icon.py` | The garage icon in the game's style: a white side silhouette with window cut-outs, belt and sill lines, door outlines with handles, the trim pieces' outlines, tall-sidewall wheels. |
 | `tools/offroad_wheel.py` | A procedural beadlock rim with tyres of given sizes (for garage tyre-size upgrades). |
 | `tools/vera_mesh.py` | Reads and writes the `.mesh` format ([docs/mesh-format.md](docs/mesh-format.md)). |
-| `profiles/` | What a converter needs to know about one source model (which material is paint, which object is a wheel, what to drop...). `tacoma.py`, `tacoma3.py` (refined first) and `bajabug.py` are working examples; `example_materials.py` is a commented starting point. |
+| `profiles/` | What a converter needs to know about one source model (which material is paint, which object is a wheel, what to drop...). `tacoma.py`, `tacoma3.py` (refined first), `bajabug.py` and `4runner4.py` (with its prep script, `4runner4_prep.py`) are working examples; `example_materials.py` is a commented starting point. |
 
 ## Requirements
 
