@@ -38,7 +38,7 @@ CLASS_RULES = [
     ('Rims', RIM), ('Hub_Lock', DETAIL), ('Tyres', TYRE),
 ]
 ALBEDO_OVERRIDE = {GLASS: (0.02, 0.02, 0.025), EMIT: (0.8, 0.8, 0.8), PAINT: (0.8, 0.8, 0.8), TRIM: (0.018, 0.018, 0.02),
-                   RIM: (0.03, 0.03, 0.032), METAL: (0.55, 0.55, 0.56), DARK: (0.02, 0.02, 0.022),
+                   RIM: (0.03, 0.03, 0.032), DETAIL: (0.03, 0.03, 0.032), METAL: (0.55, 0.55, 0.56), DARK: (0.02, 0.02, 0.022),
                    TYRE: (0.025, 0.025, 0.025)}
 
 # ---- the atlas and the bake

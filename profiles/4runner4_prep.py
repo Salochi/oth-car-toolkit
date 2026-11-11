@@ -226,6 +226,67 @@ objs['Object_12'].name = 'lamp_front_indicator'
 log('glass:', {k: len(o.data.polygons) for k, o in g.items()})
 
 # ---------------------------------------------------------------- decimate the wheels (the converter keeps them whole)
+WHEEL_WELD = 0.0005
+BACK_GAP = 0.0015        # metres behind the front
+TYRE_BACK_R = 0.33       # tyre faces nearer the hub than this (the bead and inner sidewall, not the tread) get backs
+
+
+def plate_filler(bm, segments=64):
+    """A black disc in the middle of the rim's back plate, between its front and the back side wheel_backs adds, drawn
+    both ways: the plate's small round details came out of the decimation as a ring of pinholes, which showed whatever
+    lay behind as light specks. Only seen through those holes."""
+    vs = np.array([tuple(v.co) for v in bm.verts]); c = (vs.min(0) + vs.max(0)) / 2
+    inboard = -math.copysign(1.0, c[0])               # the plate faces the car's middle
+    xs, ar, rs = [], [], []
+    for f in bm.faces:
+        p = f.calc_center_median(); r = math.hypot(p.y - c[1], p.z - c[2])
+        if f.normal.x * inboard > 0.9 and r < 0.18:
+            xs.append(p.x); ar.append(f.calc_area()); rs.append(r)
+    xs, ar, rs = map(np.array, (xs, ar, rs))
+    h, e = np.histogram(xs, bins=60, weights=ar)
+    i = int(h.argmax()); sel = (xs >= e[i]) & (xs <= e[i + 1])
+    x = float(np.average(xs[sel], weights=ar[sel])) - inboard * BACK_GAP / SCALE / 2
+    rad = float(np.percentile(rs[sel], 95)) - 0.002
+    for side in (1, -1):
+        ring = [bm.verts.new((x, c[1] + rad * math.cos(t), c[2] + rad * math.sin(t)))
+                for t in np.linspace(0, 2 * math.pi, segments, endpoint=False)]
+        f = bm.faces.new(ring if side > 0 else ring[::-1]); f.material_index = 0   # the rim's black
+        bm.normal_update()
+        if f.normal.x * inboard * side < 0: f.normal_flip()
+    bmesh.ops.triangulate(bm, faces=[f for f in bm.faces if len(f.verts) > 4])
+    log(f'  plate filler at x {x:.4f}, radius {rad:.3f}')
+
+
+def wheel_backs(o, tyre):
+    """Back sides for the rim and the tyre's bead: both are one-sided skins, and the game draws only fronts. Without
+    them the rim's back plate (facing inboard) left the spoke windows see-through from outside, the spokes had no back
+    from inside, and between the rim's inboard lip and the tyre bead a crescent looked through the hollow tyre. The
+    same faces turned round, BACK_GAP behind (as refine.py's back_faces). The source's custom normals go: they would
+    turn the backs round again in the converter's winding check (it smooths at 35 degrees instead)."""
+    bm = bmesh.new(); bm.from_mesh(o.data); bm.normal_update()
+    faces = list(bm.faces)
+    if not tyre:
+        plate_filler(bm)
+        faces = [f for f in faces if f.is_valid]
+    if tyre:
+        vs = np.array([tuple(v.co) for v in bm.verts]); c = (vs.min(0) + vs.max(0)) / 2
+        faces = [f for f in faces if math.hypot(*(np.array(f.calc_center_median())[1:] - c[1:])) < TYRE_BACK_R]
+    dup = bmesh.ops.duplicate(bm, geom=faces)
+    nf = [g for g in dup['geom'] if isinstance(g, bmesh.types.BMFace)]
+    nv = [g for g in dup['geom'] if isinstance(g, bmesh.types.BMVert)]
+    off = {v: Vector() for v in nv}
+    for f in nf:
+        for v in f.verts: off[v] += f.normal * f.calc_area()
+    for v in nv:
+        if off[v].length > 1e-12: v.co -= off[v].normalized() * (BACK_GAP / SCALE)
+    bmesh.ops.reverse_faces(bm, faces=nf)
+    bm.to_mesh(o.data); bm.free()
+    if o.data.has_custom_normals:
+        bpy.context.view_layer.objects.active = o
+        bpy.ops.mesh.customdata_custom_splitnormals_clear()
+    log(f'  {o.name}: {len(nf)} back faces')
+
+
 groups = {}
 for o in list(scene.objects):
     if o.type == 'MESH' and o.name.startswith(('Tire_', 'Wheel_')):
@@ -236,12 +297,16 @@ for gname, os_ in groups.items():
     bpy.context.view_layer.objects.active = os_[0]
     if len(os_) > 1: bpy.ops.object.join()
     j = bpy.context.view_layer.objects.active; j.name = gname
+    # welded first: the source's pieces meet edge to edge unwelded, and the decimation opened them into pinholes
+    bm = bmesh.new(); bm.from_mesh(j.data)
+    bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=WHEEL_WELD); bm.to_mesh(j.data); bm.free()
     n = sum(len(p.vertices) - 2 for p in j.data.polygons)
     target = TYRE_TRIS if gname.startswith('Tire') else WHEEL_TRIS
     if n > target:
         md = j.modifiers.new('d', 'DECIMATE'); md.ratio = target / n
         bpy.ops.object.modifier_apply(modifier='d')
     log(f'{gname}: {n} -> {sum(len(p.vertices) - 2 for p in j.data.polygons)} tris')
+    wheel_backs(j, gname.startswith('Tire'))
 
 # ---------------------------------------------------------------- name the rest
 names = {'Object_8': 'rr_paint', 'Object_24': 'rr_mirrorglass'}
